@@ -1819,21 +1819,25 @@ async function loadHistorialVentas(){
 async function eliminarVenta(id, items){
   if(!confirm('¿Eliminar esta venta? Se devolverá el stock automáticamente.')) return;
   try{
-    // Devolver stock
-    const batch = db.batch();
+    // Devolver stock solo si el producto existe en Firestore
     for(const it of items){
       if(it.id && !it.id.startsWith('promo_') && it.id !== 'cobro'){
         const ref = db.collection('productos').doc(it.id);
-        batch.update(ref, {stock: firebase.firestore.FieldValue.increment(it.qty||0)});
-        // log movimiento de devolución
-        await db.collection('movimientos').add({
-          productoId:it.id, productoNombre:it.nombre,
-          tipo:'devolucion', cantidad:it.qty||0,
-          usuario:curUser.email, timestamp:firebase.firestore.FieldValue.serverTimestamp()
-        });
+        const docSnap = await ref.get();
+        if(docSnap.exists){
+          // Calcular unidades reales (considerando pack)
+          const unidadesPorPack = it.isPack ? (parseInt((it.packDesc||'').replace(/\D/g,''))||1) : 1;
+          const unidadesADevolver = (it.qty||0) * unidadesPorPack;
+          await ref.update({stock: firebase.firestore.FieldValue.increment(unidadesADevolver)});
+          await db.collection('movimientos').add({
+            productoId:it.id, productoNombre:it.nombre,
+            tipo:'devolucion', cantidad:unidadesADevolver,
+            usuario:curUser.email, timestamp:firebase.firestore.FieldValue.serverTimestamp()
+          });
+        }
+        // Si el producto no existe, se ignora y se sigue con la eliminación
       }
     }
-    await batch.commit();
     // Eliminar venta
     await db.collection('ventas').doc(id).delete();
     toast('Venta eliminada y stock devuelto');
