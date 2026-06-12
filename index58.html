@@ -290,6 +290,30 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <div id="d-ultimas-ventas"><p class="text-muted text-sm">Sin ventas registradas</p></div>
           </div>
         </div>
+
+        <!-- FILA 5: producto estrella + ventas diarias mes -->
+        <div class="grid-2 mb-4">
+          <div class="card">
+            <div class="card-title mb-3">📦 Top 10 — Más Vendidos del Mes</div>
+            <div class="chart-container" style="height:260px"><canvas id="chart-top-productos"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="card-title mb-3">📅 Ventas Diarias — Mes Actual</div>
+            <div class="chart-container" style="height:260px"><canvas id="chart-ventas-diarias"></canvas></div>
+          </div>
+        </div>
+        <!-- FILA 6: producto estrella -->
+        <div class="card mb-4" id="card-producto-estrella" style="display:none">
+          <div class="flex items-center gap-4">
+            <div style="font-size:2.5rem">🏆</div>
+            <div>
+              <div class="card-title">Producto Estrella del Mes</div>
+              <div class="font-bold" style="font-size:1.1rem" id="estrella-nombre">—</div>
+              <div class="text-sm text-muted" id="estrella-datos">—</div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <!-- === VENTAS === -->
@@ -1002,6 +1026,8 @@ function listenDashboard(){
   unsubs.push(u5);
 
   loadChartSemana();
+  loadChartTopProductos();
+  loadChartVentasDiarias();
 }
 
 async function loadChartSemana(){
@@ -1023,6 +1049,104 @@ async function loadChartSemana(){
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
       scales:{x:{ticks:{color:'#8892a4'},grid:{color:'rgba(255,255,255,.05)'}},
               y:{ticks:{color:'#8892a4',callback:v=>'₲'+(v/1000).toFixed(0)+'K'},grid:{color:'rgba(255,255,255,.05)'}}}}
+  });
+}
+
+async function loadChartTopProductos(){
+  const snap = await db.collection('ventas')
+    .where('timestamp','>=',firebase.firestore.Timestamp.fromDate(startOfMonth())).get();
+  const conteo = {};
+  snap.forEach(d=>{
+    const v=d.data();
+    if(v.tipoVenta==='cobro_credito') return;
+    (v.items||[]).forEach(it=>{
+      if(it.id&&!it.id.startsWith('promo_')){
+        if(!conteo[it.nombre]) conteo[it.nombre]={qty:0,total:0};
+        conteo[it.nombre].qty   += it.qty||0;
+        conteo[it.nombre].total += (it.precio||0)*(it.qty||0);
+      }
+    });
+  });
+  const sorted = Object.entries(conteo).sort((a,b)=>b[1].qty-a[1].qty).slice(0,10);
+
+  // Producto estrella
+  if(sorted.length){
+    const estrella = sorted[0];
+    document.getElementById('card-producto-estrella').style.display='flex';
+    document.getElementById('estrella-nombre').textContent = estrella[0];
+    document.getElementById('estrella-datos').textContent =
+      `${estrella[1].qty} unidades vendidas · ${fPYG(estrella[1].total)} en ventas este mes`;
+  }
+
+  const ctx = document.getElementById('chart-top-productos');
+  if(!ctx) return;
+  if(window._chartTop) window._chartTop.destroy();
+  window._chartTop = new Chart(ctx,{
+    type:'bar',
+    data:{
+      labels: sorted.map(x=>x[0].length>18?x[0].substring(0,18)+'…':x[0]),
+      datasets:[{
+        label:'Unidades',
+        data: sorted.map(x=>x[1].qty),
+        backgroundColor:'rgba(0,153,255,.6)',
+        borderColor:'rgba(0,153,255,1)',
+        borderWidth:1, borderRadius:4
+      }]
+    },
+    options:{
+      indexAxis:'y',
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#8892a4'},grid:{color:'rgba(255,255,255,.05)'}},
+        y:{ticks:{color:'#8892a4',font:{size:11}},grid:{color:'rgba(255,255,255,.05)'}}
+      }
+    }
+  });
+}
+
+async function loadChartVentasDiarias(){
+  const inicio = startOfMonth();
+  const snap = await db.collection('ventas')
+    .where('timestamp','>=',firebase.firestore.Timestamp.fromDate(inicio)).get();
+
+  const hoy = new Date();
+  const diasEnMes = new Date(hoy.getFullYear(), hoy.getMonth()+1, 0).getDate();
+  const totales = Array(diasEnMes).fill(0);
+
+  snap.forEach(d=>{
+    const v=d.data();
+    const f = v.timestamp?.toDate?.() || new Date(v.timestamp);
+    const dia = f.getDate()-1;
+    if(dia>=0 && dia<diasEnMes) totales[dia] += v.total||0;
+  });
+
+  const labels = Array.from({length:diasEnMes},(_,i)=>String(i+1));
+  const ctx = document.getElementById('chart-ventas-diarias');
+  if(!ctx) return;
+  if(window._chartDiario) window._chartDiario.destroy();
+  window._chartDiario = new Chart(ctx,{
+    type:'line',
+    data:{
+      labels,
+      datasets:[{
+        label:'Ventas (₲)',
+        data:totales,
+        borderColor:'rgba(0,212,170,1)',
+        backgroundColor:'rgba(0,212,170,.1)',
+        borderWidth:2, pointRadius:3,
+        pointBackgroundColor:'rgba(0,212,170,1)',
+        fill:true, tension:0.3
+      }]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{legend:{display:false}},
+      scales:{
+        x:{ticks:{color:'#8892a4',maxTicksLimit:15},grid:{color:'rgba(255,255,255,.05)'}},
+        y:{ticks:{color:'#8892a4',callback:v=>'₲'+(v/1000).toFixed(0)+'K'},grid:{color:'rgba(255,255,255,.05)'}}
+      }
+    }
   });
 }
 
