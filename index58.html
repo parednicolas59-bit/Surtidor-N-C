@@ -337,8 +337,9 @@ tr:hover td{background:rgba(255,255,255,.02);}
               </div>
               <div id="sec-pago-contado">
                 <div class="form-group">
-                  <label>Medio de Pago</label>
+                  <label>Medio de Pago <span style="color:var(--danger)">*</span></label>
                   <select id="venta-medio-pago" class="search-input">
+                    <option value="">— Elegí un medio de pago —</option>
                     <option value="efectivo">💵 Efectivo</option>
                     <option value="transferencia">🏦 Transferencia</option>
                     <option value="tarjeta">💳 Tarjeta</option>
@@ -863,7 +864,11 @@ auth.onAuthStateChanged(async user=>{
     document.getElementById('auth-screen').style.display='none';
     document.getElementById('app-screen').style.display='block';
     buildNav(); initUI(); startListeners();
-    setPage(curRole==='admin'?'dashboard':'ventas');
+    if(curRole==='vendedor'){
+      setPage('caja');
+    } else {
+      setPage('dashboard');
+    }
   } else {
     curUser=null; curRole=null;
     document.getElementById('auth-screen').style.display='flex';
@@ -912,6 +917,11 @@ function buildTableHeader(){
 
 function setPage(name){
   if(curRole!=='admin' && ADMIN_ONLY.includes(name)) return;
+  // Vendedor debe abrir caja antes de acceder a otras secciones
+  if(curRole==='vendedor' && name!=='caja' && !cajaActual){
+    toast('Primero tenés que abrir la caja','warn'); 
+    name='caja';
+  }
   document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
   const sec=document.getElementById('sec-'+name);
   if(sec) sec.classList.add('active');
@@ -1492,7 +1502,8 @@ async function confirmarVenta(){
     }
   }
   const total = cart.reduce((s,i)=>s+i.precio*i.qty,0);
-  const mp    = tipoVenta==='credito'?'credito':document.getElementById('venta-medio-pago').value;
+  const mp = tipoVenta==='credito'?'credito':document.getElementById('venta-medio-pago').value;
+  if(!mp){ toast('Elegí un medio de pago antes de confirmar','error'); return; }
   const vdata = {
     items:cart.map(i=>({...i})), total, medioPago:mp, tipoVenta,
     vendedor:curUser.email, timestamp:firebase.firestore.FieldValue.serverTimestamp()
@@ -1601,7 +1612,10 @@ async function abrirCaja(){
       apertura:firebase.firestore.FieldValue.serverTimestamp(),
       usuario:curUser.email
     });
-    toast('Caja abierta'); loadCajaStatus();
+    toast('Caja abierta');
+    await loadCajaStatus();
+    // Si es vendedor, redirigir a ventas automáticamente
+    if(curRole==='vendedor') setPage('ventas');
   }catch(e){ toast('Error: '+e.message,'error'); }
 }
 
