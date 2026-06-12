@@ -678,8 +678,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
     </div>
     <div class="modal-body" id="comprobante-body"></div>
     <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal('modal-comprobante')">Cerrar</button>
-      <button class="btn btn-success" id="btn-wp">📱 WhatsApp</button>
+      <button class="btn btn-primary" onclick="closeModal('modal-comprobante')">✓ Cerrar</button>
     </div>
   </div>
 </div>
@@ -963,7 +962,9 @@ function listenDashboard(){
       if(v.tipoVenta==='cobro_credito'){ cobrosHoy+=v.total||0; return; }
       (v.items||[]).forEach(it=>{
         const p = prods.find(x=>x.id===it.id);
-        const costo = (p?.precioCosto || it.precioCosto || 0) * it.qty;
+        const unidadesPorPack = it.isPack ? (parseInt((it.packDesc||'').replace(/\D/g,''))||1) : 1;
+        const unidadesReales = it.qty * unidadesPorPack;
+        const costo = (p?.precioCosto || it.precioCosto || 0) * unidadesReales;
         gHoy += it.precio*it.qty - costo;
       });
     });
@@ -997,7 +998,9 @@ function listenDashboard(){
       if(v.tipoVenta==='cobro_credito') return;
       (v.items||[]).forEach(it=>{
         const p = prods.find(x=>x.id===it.id);
-        const costo = (p?.precioCosto || it.precioCosto || 0) * it.qty;
+        const unidadesPorPack = it.isPack ? (parseInt((it.packDesc||'').replace(/\D/g,''))||1) : 1;
+        const unidadesReales = it.qty * unidadesPorPack;
+        const costo = (p?.precioCosto || it.precioCosto || 0) * unidadesReales;
         gMes += it.precio*it.qty - costo;
       });
     });
@@ -1505,10 +1508,13 @@ async function confirmarVenta(){
     const batch=db.batch();
     for(const it of cart){
       if(it.id.startsWith('promo_')) continue;
-      batch.update(db.collection('productos').doc(it.id),{stock:firebase.firestore.FieldValue.increment(-it.qty)});
+      // Si es pack, extraer cantidad de unidades del packDesc (ej: "Pack 6" → 6)
+      const unidadesPorPack = it.isPack ? (parseInt((it.packDesc||'').replace(/\D/g,''))||1) : 1;
+      const unidadesADescontar = it.qty * unidadesPorPack;
+      batch.update(db.collection('productos').doc(it.id),{stock:firebase.firestore.FieldValue.increment(-unidadesADescontar)});
       await db.collection('movimientos').add({
         productoId:it.id,productoNombre:it.nombre,tipo:'venta',
-        cantidad:it.qty,precioCosto:it.precioCosto||0,ventaId:ref.id,
+        cantidad:unidadesADescontar,precioCosto:it.precioCosto||0,ventaId:ref.id,
         usuario:curUser.email,timestamp:firebase.firestore.FieldValue.serverTimestamp()
       });
     }
@@ -1547,7 +1553,7 @@ function mostrarComprobante(v,id){
   const items=v.items.map(i=>`${i.qty}x ${i.nombre}: ${fPYG(i.precio*i.qty)}`).join('%0A');
   const msg=`*Surtidor N%26C*%0AComprobante%0A%0A${items}%0A%0A*TOTAL: ${fPYG(v.total)}*%0APago: ${mpLabel(v.medioPago)}`;
   const tel=(v.telCliente||'').replace(/\D/g,'');
-  document.getElementById('btn-wp').onclick=()=>window.open(`https://wa.me/${tel}?text=${msg}`,'_blank');
+  // WhatsApp button removed
   openModal('modal-comprobante');
 }
 
