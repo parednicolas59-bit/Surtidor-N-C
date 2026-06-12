@@ -231,6 +231,8 @@ tr:hover td{background:rgba(255,255,255,.02);}
 
       <!-- === DASHBOARD (admin only) === -->
       <div class="section active" id="sec-dashboard">
+        <!-- Notificación cierres de caja sin revisar -->
+        <div id="d-notif-caja" style="display:none" class="mb-4"></div>
         <div class="grid-4 mb-4">
           <div class="card">
             <div class="card-title">Ventas Hoy</div>
@@ -944,6 +946,14 @@ function setPage(name){
   if(name==='productos')  renderProductos(prods);
 }
 
+async function marcarCajaVisto(){
+  const snap=await db.collection('caja').where('estado','==','cerrada').where('vistoPorAdmin','==',false).get();
+  const batch=db.batch();
+  snap.forEach(d=>batch.update(d.ref,{vistoPorAdmin:true}));
+  await batch.commit();
+  toast('Cierres marcados como vistos');
+}
+
 // ===================================================
 // LISTENERS TIEMPO REAL
 // ===================================================
@@ -1063,6 +1073,45 @@ function listenDashboard(){
   loadChartSemana();
   loadChartTopProductos();
   loadChartVentasDiarias();
+
+  // Listener cierres de caja sin revisar
+  const u6 = db.collection('caja')
+    .where('estado','==','cerrada')
+    .where('vistoPorAdmin','==',false)
+    .onSnapshot(snap=>{
+      const el=document.getElementById('d-notif-caja'); if(!el) return;
+      const cierres=snap.docs.map(d=>({id:d.id,...d.data()}));
+      if(!cierres.length){ el.style.display='none'; el.innerHTML=''; return; }
+      el.style.display='block';
+      el.innerHTML=`
+        <div style="background:rgba(255,165,2,.12);border:1px solid rgba(255,165,2,.4);border-radius:12px;padding:16px 20px">
+          <div class="flex justify-between items-center mb-3">
+            <div class="flex items-center gap-3">
+              <span style="font-size:1.4rem">🔔</span>
+              <div>
+                <div class="font-bold" style="color:var(--warn)">${cierres.length} cierre${cierres.length>1?'s':''} de caja sin revisar</div>
+                <div class="text-xs text-muted">Cierres pendientes de revisión</div>
+              </div>
+            </div>
+            <button class="btn btn-sm" style="border-color:rgba(255,165,2,.4);color:var(--warn)" onclick="marcarCajaVisto()">✓ Marcar como visto</button>
+          </div>
+          ${cierres.map(c=>`
+            <div style="background:rgba(0,0,0,.2);border-radius:8px;padding:10px 14px;margin-bottom:8px;border-left:3px solid var(--warn)">
+              <div class="flex justify-between items-center mb-2">
+                <span class="font-bold text-sm">👤 ${c.usuarioCierre?.split('@')[0]||'—'}</span>
+                <span class="text-xs text-muted">${fDate(c.cierre)}</span>
+              </div>
+              <div class="flex gap-4" style="flex-wrap:wrap">
+                <span class="text-sm">💵 Efectivo: <strong>${fPYG(c.efectivoVentas||0)}</strong></span>
+                <span class="text-sm">🏦 Transfer.: <strong>${fPYG(c.transferenciaVentas||0)}</strong></span>
+                <span class="text-sm">💳 Tarjeta: <strong>${fPYG(c.tarjetaVentas||0)}</strong></span>
+                <span class="text-sm">📥 Total: <strong class="text-accent">${fPYG(c.totalVentas||0)}</strong></span>
+                <span class="text-sm ${(c.diferencia||0)<0?'text-danger':'text-success'}">${(c.diferencia||0)>=0?'✅':'⚠️'} Diferencia: <strong>${(c.diferencia||0)>=0?'+':''}${fPYG(c.diferencia||0)}</strong></span>
+              </div>
+            </div>`).join('')}
+        </div>`;
+    });
+  unsubs.push(u6);
 }
 
 async function loadChartSemana(){
@@ -1661,14 +1710,44 @@ async function cerrarCaja(){
     else if(v.medioPago==='tarjeta') ta+=v.total||0;
   });
   const esperado=(cajaActual.montoInicial||0)+ef;
+  const diferencia=contado-esperado;
+  const ahora=new Date();
+  const horaStr=ahora.toLocaleTimeString('es-PY',{hour:'2-digit',minute:'2-digit'});
+  const fechaStr=ahora.toLocaleDateString('es-PY',{day:'2-digit',month:'2-digit',year:'numeric'});
   try{
     await db.collection('caja').doc(cajaActual.id).update({
       estado:'cerrada',cierre:firebase.firestore.FieldValue.serverTimestamp(),
       efectivoContado:contado,efectivoVentas:ef,transferenciaVentas:tr,tarjetaVentas:ta,
-      totalVentas:tv,diferencia:contado-esperado,
-      usuarioCierre:curUser.email,notificacionAdmin:true
+      totalVentas:tv,diferencia,horaApertura:fDate(cajaActual.apertura),horaCierre:horaStr,
+      usuarioCierre:curUser.email,notificacionAdmin:true,vistoPorAdmin:false
     });
-    cajaActual=null; toast('Caja cerrada'); loadCajaStatus();
+
+    // Armar mensaje WhatsApp para el admin
+    const lineas=[
+      `🏪 *CIERRE DE CAJA — Surtidor N&C*`,
+      `📅 Fecha: ${fechaStr}`,
+      `👤 Vendedor: ${curUser.email.split('@')[0]}`,
+      `⏰ Apertura: ${fDate(cajaActual.apertura)}`,
+      `⏰ Cierre: ${horaStr}`,
+      `💰 Monto inicial: ${fPYG(cajaActual.montoInicial||0)}`,
+      ``,
+      `📊 *VENTAS DEL TURNO*`,
+      `💵 Efectivo: ${fPYG(ef)}`,
+      `🏦 Transferencia: ${fPYG(tr)}`,
+      `💳 Tarjeta: ${fPYG(ta)}`,
+      `📥 *Total vendido: ${fPYG(tv)}*`,
+      ``,
+      `💵 Efectivo esperado en caja: ${fPYG(esperado)}`,
+      `💵 Efectivo declarado: ${fPYG(contado)}`,
+      `${diferencia>=0?'✅':'⚠️'} Diferencia: ${diferencia>=0?'+':''}${fPYG(diferencia)}`,
+    ].join('\n');
+
+    const adminTel='595975159146';
+    window.open(`https://wa.me/${adminTel}?text=${encodeURIComponent(lineas)}`,'_blank');
+
+    cajaActual=null;
+    toast('Caja cerrada — se abrió WhatsApp para notificar al admin');
+    loadCajaStatus();
   }catch(e){ toast('Error: '+e.message,'error'); }
 }
 
