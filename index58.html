@@ -468,6 +468,26 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </div>
       </div>
 
+      <!-- === HISTORIAL VENTAS (admin) === -->
+      <div class="section" id="sec-historial">
+        <div class="flex justify-between items-center mb-4">
+          <div class="flex gap-2 items-center">
+            <input type="date" class="search-input" id="hist-desde" style="max-width:160px">
+            <input type="date" class="search-input" id="hist-hasta" style="max-width:160px">
+            <button class="btn btn-secondary btn-sm" onclick="loadHistorialVentas()">🔍 Filtrar</button>
+          </div>
+          <div id="hist-resumen" class="text-muted text-sm"></div>
+        </div>
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Fecha</th><th>Productos</th><th>Total</th><th>Pago</th><th>Vendedor</th><th>Acciones</th></tr></thead>
+              <tbody id="tbody-historial"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- === CRÉDITOS (admin) === -->
       <div class="section" id="sec-creditos">
         <div class="flex justify-between items-center mb-4">
@@ -711,6 +731,7 @@ const NAV_ADMIN = [
   {i:'📦',l:'Productos',     p:'productos'},
   {i:'🏪',l:'Stock',         p:'stock'},
   {i:'💵',l:'Caja',          p:'caja'},
+  {i:'🧾',l:'Historial',     p:'historial'},
   {i:'📋',l:'Créditos',      p:'creditos'},
   {i:'🎁',l:'Promociones',   p:'promos'},
   {i:'📤',l:'Egresos',       p:'egresos'},
@@ -723,7 +744,7 @@ const NAV_VENDEDOR = [
   {i:'🏪',l:'Stock',      p:'stock'},
   {i:'💵',l:'Caja',       p:'caja'},
 ];
-const ADMIN_ONLY = ['dashboard','creditos','promos','egresos','inventario','config'];
+const ADMIN_ONLY = ['dashboard','historial','creditos','promos','egresos','inventario','config'];
 
 // ===================================================
 // STATE
@@ -899,11 +920,12 @@ function setPage(name){
   const nav=document.querySelector(`.nav-item[data-page="${name}"]`);
   if(nav) nav.classList.add('active');
   const titles={dashboard:'Dashboard',ventas:'Nueva Venta',productos:'Productos',stock:'Stock',
-    caja:'Caja',creditos:'Créditos',promos:'Promociones',egresos:'Egresos',inventario:'Inventario',config:'Configuración'};
+    caja:'Caja',historial:'Historial de Ventas',creditos:'Créditos',promos:'Promociones',egresos:'Egresos',inventario:'Inventario',config:'Configuración'};
   document.getElementById('page-title').textContent = titles[name]||name;
   closeSidebar();
   // Page-specific loads
   if(name==='ventas')     loadPromosVentas();
+  if(name==='historial')  { initHistorial(); loadHistorialVentas(); }
   if(name==='caja')       loadCajaStatus();
   if(name==='creditos')   loadCreditos();
   if(name==='inventario') renderInventario();
@@ -1644,6 +1666,80 @@ async function loadCierres(){
       <td class="text-muted text-sm">${c.usuarioCierre||'—'}</td>
     </tr>`;
   }).join('');
+}
+
+// ===================================================
+// HISTORIAL DE VENTAS (admin)
+// ===================================================
+function initHistorial(){
+  const hoy = today();
+  const inicioMes = new Date(); inicioMes.setDate(1);
+  const inicioStr = inicioMes.toISOString().split('T')[0];
+  if(!document.getElementById('hist-desde').value) document.getElementById('hist-desde').value = inicioStr;
+  if(!document.getElementById('hist-hasta').value) document.getElementById('hist-hasta').value = hoy;
+}
+
+async function loadHistorialVentas(){
+  const desde = document.getElementById('hist-desde').value;
+  const hasta = document.getElementById('hist-hasta').value;
+  if(!desde||!hasta){ toast('Seleccioná un rango de fechas','error'); return; }
+
+  const tsDesde = firebase.firestore.Timestamp.fromDate(new Date(desde+'T00:00:00'));
+  const tsHasta = firebase.firestore.Timestamp.fromDate(new Date(hasta+'T23:59:59'));
+
+  const snap = await db.collection('ventas')
+    .where('timestamp','>=',tsDesde)
+    .where('timestamp','<=',tsHasta)
+    .orderBy('timestamp','desc')
+    .get();
+
+  const ventas = snap.docs.map(d=>({id:d.id,...d.data()}));
+  const totalGeneral = ventas.reduce((s,v)=>s+(v.total||0),0);
+  document.getElementById('hist-resumen').textContent =
+    `${ventas.length} ventas · Total: ${fPYG(totalGeneral)}`;
+
+  const tbody = document.getElementById('tbody-historial');
+  if(!tbody) return;
+  tbody.innerHTML = ventas.length
+    ? ventas.map(v=>{
+        const items = (v.items||[]).map(i=>`${i.qty}x ${i.nombre}`).join(', ');
+        return `<tr>
+          <td>${fDate(v.timestamp)}</td>
+          <td class="text-sm" style="max-width:260px;white-space:normal">${items}</td>
+          <td class="text-accent font-bold">${fPYG(v.total)}</td>
+          <td>${mpLabel(v.medioPago)}</td>
+          <td class="text-muted text-sm">${v.vendedor||'—'}</td>
+          <td>
+            <button class="btn btn-danger btn-xs" onclick="eliminarVenta('${v.id}',${JSON.stringify(v.items||[]).replace(/"/g,"'")})">🗑 Eliminar</button>
+          </td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="6" style="text-align:center;color:var(--text2);padding:24px">Sin ventas en ese período</td></tr>';
+}
+
+async function eliminarVenta(id, items){
+  if(!confirm('¿Eliminar esta venta? Se devolverá el stock automáticamente.')) return;
+  try{
+    // Devolver stock
+    const batch = db.batch();
+    for(const it of items){
+      if(it.id && !it.id.startsWith('promo_') && it.id !== 'cobro'){
+        const ref = db.collection('productos').doc(it.id);
+        batch.update(ref, {stock: firebase.firestore.FieldValue.increment(it.qty||0)});
+        // log movimiento de devolución
+        await db.collection('movimientos').add({
+          productoId:it.id, productoNombre:it.nombre,
+          tipo:'devolucion', cantidad:it.qty||0,
+          usuario:curUser.email, timestamp:firebase.firestore.FieldValue.serverTimestamp()
+        });
+      }
+    }
+    await batch.commit();
+    // Eliminar venta
+    await db.collection('ventas').doc(id).delete();
+    toast('Venta eliminada y stock devuelto');
+    loadHistorialVentas();
+  }catch(e){ toast('Error: '+e.message,'error'); }
 }
 
 // ===================================================
