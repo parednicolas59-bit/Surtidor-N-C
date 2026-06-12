@@ -216,6 +216,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
           <div class="user-role" id="user-role-disp">—</div>
         </div>
       </div>
+      <button class="btn btn-secondary btn-sm btn-full mb-2" onclick="descargarBackup()" style="border-color:rgba(0,212,170,.4);color:var(--accent)">💾 Backup</button>
       <button class="btn btn-secondary btn-sm btn-full" onclick="doLogout()">Cerrar sesión</button>
     </div>
   </div>
@@ -562,7 +563,7 @@ tr:hover td{background:rgba(255,255,255,.02);}
 
       <!-- === CONFIGURACIÓN (admin) === -->
       <div class="section" id="sec-config">
-        <div class="grid-2" style="align-items:start">
+        <div class="grid-2 mb-4" style="align-items:start">
           <div class="card">
             <div class="card-title mb-4">🔑 Cambiar Contraseña</div>
             <div class="form-group"><label>Nueva contraseña</label><input type="password" class="search-input" id="cfg-pass" placeholder="Mínimo 6 caracteres"></div>
@@ -573,6 +574,20 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <p class="text-sm text-muted mb-2">Surtidor N&amp;C — Sistema de Gestión</p>
             <p class="text-sm text-muted mb-2">Firebase Firestore + Auth</p>
             <p class="text-sm text-muted">v1.0 — 2025</p>
+          </div>
+        </div>
+        <div class="grid-2" style="align-items:start">
+          <div class="card" style="border-color:rgba(0,212,170,.25)">
+            <div class="card-title mb-3">📅 Cierre de Mes</div>
+            <p class="text-sm text-muted mb-3">Genera un resumen del mes actual y lo guarda en Firestore. Las ventas históricas se conservan, el dashboard se resetea al nuevo mes automáticamente.</p>
+            <div id="cierre-mes-preview" class="alert alert-info mb-3" style="display:none"></div>
+            <button class="btn btn-primary btn-sm" onclick="previsualizarCierreMes()">📊 Ver resumen del mes</button>
+            <button class="btn btn-danger btn-sm mt-2" id="btn-confirmar-cierre-mes" style="display:none" onclick="confirmarCierreMes()">✓ Confirmar Cierre de Mes</button>
+          </div>
+          <div class="card" style="border-color:rgba(0,212,170,.25)">
+            <div class="card-title mb-3">💾 Backup de Datos</div>
+            <p class="text-sm text-muted mb-3">Descargá un archivo JSON con todos los datos del sistema: ventas, productos, stock, créditos, egresos y caja.</p>
+            <button class="btn btn-primary btn-sm" onclick="descargarBackup()">💾 Descargar Backup</button>
           </div>
         </div>
       </div>
@@ -1842,6 +1857,134 @@ async function eliminarVenta(id, items){
     await db.collection('ventas').doc(id).delete();
     toast('Venta eliminada y stock devuelto');
     loadHistorialVentas();
+  }catch(e){ toast('Error: '+e.message,'error'); }
+}
+
+// ===================================================
+// BACKUP
+// ===================================================
+async function descargarBackup(){
+  toast('Generando backup...','warn');
+  try{
+    // Traer todas las colecciones
+    const colecciones = ['productos','ventas','creditos','egresos','caja','movimientos','promos'];
+    const backup = { _fecha: new Date().toISOString(), _version: '1.0' };
+    for(const col of colecciones){
+      const snap = await db.collection(col).get();
+      backup[col] = snap.docs.map(d=>({_id:d.id,...d.data()}));
+      // Convertir Timestamps a string legible
+      backup[col] = backup[col].map(doc=>{
+        const clean = {};
+        Object.entries(doc).forEach(([k,v])=>{
+          clean[k] = v?.toDate ? v.toDate().toISOString() : v;
+        });
+        return clean;
+      });
+    }
+    const fecha = new Date().toISOString().slice(0,16).replace('T','_').replace(':','-');
+    const nombre = `backup_surtidor_nc_${fecha}.json`;
+    const blob = new Blob([JSON.stringify(backup, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href=url; a.download=nombre; a.click();
+    URL.revokeObjectURL(url);
+    toast(`✅ Backup descargado: ${nombre}`);
+  }catch(e){ toast('Error al generar backup: '+e.message,'error'); }
+}
+
+// ===================================================
+// CIERRE DE MES (admin)
+// ===================================================
+async function previsualizarCierreMes(){
+  const hoy = new Date();
+  const mesStr = hoy.getFullYear()+'-'+String(hoy.getMonth()+1).padStart(2,'0');
+  const inicio = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+
+  const snap = await db.collection('ventas')
+    .where('timestamp','>=', firebase.firestore.Timestamp.fromDate(inicio)).get();
+
+  let totalVentas=0, ef=0, tr=0, ta=0, cantVentas=0;
+  snap.forEach(d=>{
+    const v=d.data();
+    if(v.tipoVenta==='cobro_credito') return;
+    totalVentas+=v.total||0; cantVentas++;
+    if(v.medioPago==='efectivo') ef+=v.total||0;
+    else if(v.medioPago==='transferencia') tr+=v.total||0;
+    else if(v.medioPago==='tarjeta') ta+=v.total||0;
+  });
+
+  // Calcular ganancia
+  let ganancia=0;
+  snap.forEach(d=>{
+    const v=d.data();
+    if(v.tipoVenta==='cobro_credito') return;
+    (v.items||[]).forEach(it=>{
+      const p=prods.find(x=>x.id===it.id);
+      const unidadesPorPack=it.isPack?(parseInt((it.packDesc||'').replace(/\D/g,''))||1):1;
+      const unidades=it.qty*unidadesPorPack;
+      const costo=(p?.precioCosto||it.precioCosto||0)*unidades;
+      ganancia+=it.precio*it.qty-costo;
+    });
+  });
+
+  const el=document.getElementById('cierre-mes-preview');
+  const btnConfirmar=document.getElementById('btn-confirmar-cierre-mes');
+  if(el){
+    el.style.display='block';
+    el.innerHTML=`
+      <div class="font-bold mb-2">📅 Resumen — ${mesStr}</div>
+      <div class="caja-row"><span>Ventas realizadas</span><span class="font-bold">${cantVentas}</span></div>
+      <div class="caja-row"><span>Total vendido</span><span class="font-bold text-accent">${fPYG(totalVentas)}</span></div>
+      <div class="caja-row"><span>💵 Efectivo</span><span>${fPYG(ef)}</span></div>
+      <div class="caja-row"><span>🏦 Transferencia</span><span>${fPYG(tr)}</span></div>
+      <div class="caja-row"><span>💳 Tarjeta</span><span>${fPYG(ta)}</span></div>
+      <div class="caja-row"><span>💰 Ganancia estimada</span><span class="font-bold text-success">${fPYG(ganancia)}</span></div>
+    `;
+  }
+  if(btnConfirmar) btnConfirmar.style.display='inline-flex';
+  toast('Resumen generado — revisá antes de confirmar','warn');
+}
+
+async function confirmarCierreMes(){
+  if(!confirm('¿Confirmar cierre de mes? Se guardará el resumen en Firestore. Las ventas históricas NO se borran.')) return;
+  const hoy = new Date();
+  const mesStr = hoy.getFullYear()+'-'+String(hoy.getMonth()+1).padStart(2,'0');
+  const inicio = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+
+  const snap = await db.collection('ventas')
+    .where('timestamp','>=', firebase.firestore.Timestamp.fromDate(inicio)).get();
+
+  let totalVentas=0, ef=0, tr=0, ta=0, cantVentas=0, ganancia=0;
+  snap.forEach(d=>{
+    const v=d.data();
+    if(v.tipoVenta==='cobro_credito') return;
+    totalVentas+=v.total||0; cantVentas++;
+    if(v.medioPago==='efectivo') ef+=v.total||0;
+    else if(v.medioPago==='transferencia') tr+=v.total||0;
+    else if(v.medioPago==='tarjeta') ta+=v.total||0;
+    (v.items||[]).forEach(it=>{
+      const p=prods.find(x=>x.id===it.id);
+      const unidadesPorPack=it.isPack?(parseInt((it.packDesc||'').replace(/\D/g,''))||1):1;
+      const unidades=it.qty*unidadesPorPack;
+      const costo=(p?.precioCosto||it.precioCosto||0)*unidades;
+      ganancia+=it.precio*it.qty-costo;
+    });
+  });
+
+  try{
+    await db.collection('cierres_mes').add({
+      mes: mesStr,
+      fecha: firebase.firestore.FieldValue.serverTimestamp(),
+      totalVentas, cantVentas, efectivo:ef, transferencia:tr, tarjeta:ta,
+      gananciaEstimada: ganancia,
+      creadoPor: curUser.email
+    });
+    // Ocultar botón confirmar y preview
+    const el=document.getElementById('cierre-mes-preview');
+    const btn=document.getElementById('btn-confirmar-cierre-mes');
+    if(el){ el.innerHTML='<span class="text-success">✅ Cierre guardado correctamente</span>'; }
+    if(btn) btn.style.display='none';
+    toast(`✅ Cierre de mes ${mesStr} guardado`);
   }catch(e){ toast('Error: '+e.message,'error'); }
 }
 
