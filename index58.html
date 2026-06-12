@@ -590,6 +590,13 @@ tr:hover td{background:rgba(255,255,255,.02);}
             <button class="btn btn-primary btn-sm" onclick="descargarBackup()">💾 Descargar Backup</button>
           </div>
         </div>
+        <!-- Reset sistema — solo visible si quedan usos -->
+        <div id="card-reset-sistema" class="card mt-4" style="border-color:rgba(255,71,87,.3);display:none">
+          <div class="card-title mb-2" style="color:var(--danger)">⚠️ Resetear Sistema</div>
+          <p class="text-sm text-muted mb-2">Borra <strong>todas las ventas, caja, egresos, movimientos y créditos</strong>. Los productos y su stock se conservan.</p>
+          <p class="text-sm mb-3" style="color:var(--warn)" id="reset-usos-restantes"></p>
+          <button class="btn btn-danger btn-sm" onclick="resetearSistema()">🗑 Resetear todo — dejar en cero</button>
+        </div>
       </div>
 
     </div><!-- /page-body -->
@@ -617,14 +624,14 @@ tr:hover td{background:rgba(255,255,255,.02);}
         </div>
       </div>
       <div class="grid-2">
-        <div class="form-group"><label>Precio de Costo (₲)</label><input type="number" class="search-input" id="prod-costo" placeholder="0" oninput="calcPreviewMargen()"></div>
-        <div class="form-group"><label>Precio de Venta (₲)</label><input type="number" class="search-input" id="prod-precio" placeholder="0" oninput="calcPreviewMargen()"></div>
+        <div class="form-group"><label>Precio de Venta Unitario (₲)</label><input type="number" class="search-input" id="prod-precio" placeholder="0" oninput="calcPreviewMargen()"></div>
+        <div class="form-group"><label>Precio de Venta Pack (₲)</label><input type="number" class="search-input" id="prod-precio-pack" placeholder="0 (opcional)" oninput="calcPreviewMargen()"></div>
+      </div>
+      <div class="grid-2">
+        <div class="form-group"><label>Precio de Costo del Pack (₲) <span class="text-xs text-muted">— lo que pagás por el pack</span></label><input type="number" class="search-input" id="prod-costo-pack" placeholder="0" oninput="calcPreviewMargen()"></div>
+        <div class="form-group"><label>Descripción del pack <span class="text-xs text-muted">— cantidad de unidades</span></label><input type="text" class="search-input" id="prod-pack-desc" placeholder="Ej: Pack x6" oninput="calcPreviewMargen()"></div>
       </div>
       <div id="prod-margen-preview" class="alert alert-info mb-3" style="display:none"></div>
-      <div class="grid-2">
-        <div class="form-group"><label>Precio Pack/Promo (₲)</label><input type="number" class="search-input" id="prod-precio-pack" placeholder="0 (opcional)"></div>
-        <div class="form-group"><label>Descripción del pack</label><input type="text" class="search-input" id="prod-pack-desc" placeholder="Ej: Pack x6"></div>
-      </div>
       <div class="grid-2">
         <div class="form-group"><label>Stock Actual</label><input type="number" class="search-input" id="prod-stock" placeholder="0"></div>
         <div class="form-group"><label>Stock Mínimo (alerta)</label><input type="number" class="search-input" id="prod-stock-min" placeholder="0"></div>
@@ -956,6 +963,7 @@ function setPage(name){
   if(name==='creditos')   loadCreditos();
   if(name==='inventario') renderInventario();
   if(name==='egresos')    { loadEgresos(); document.getElementById('eg-fecha').value=today(); }
+  if(name==='config')     cargarEstadoReset();
   if(name==='promos')     loadPromos();
   if(name==='stock')      loadMovimientos();
   if(name==='productos')  renderProductos(prods);
@@ -999,8 +1007,11 @@ function listenDashboard(){
         const p = prods.find(x=>x.id===it.id);
         const unidadesPorPack = it.isPack ? (parseInt((it.packDesc||'').replace(/\D/g,''))||1) : 1;
         const unidadesReales = it.qty * unidadesPorPack;
-        const costo = (p?.precioCosto || it.precioCosto || 0) * unidadesReales;
-        gHoy += it.precio*it.qty - costo;
+        // Si es pack y tiene costo de pack, usar ese; sino costo unitario × unidades
+        const costoPorItem = it.isPack && (p?.precioCostoPack||it.precioCostoPack)
+          ? (p?.precioCostoPack||it.precioCostoPack) * it.qty
+          : (p?.precioCosto || it.precioCosto || 0) * unidadesReales;
+        gHoy += it.precio*it.qty - costoPorItem;
       });
     });
     document.getElementById('d-ventas-hoy').textContent   = fPYG(vHoy);
@@ -1035,8 +1046,10 @@ function listenDashboard(){
         const p = prods.find(x=>x.id===it.id);
         const unidadesPorPack = it.isPack ? (parseInt((it.packDesc||'').replace(/\D/g,''))||1) : 1;
         const unidadesReales = it.qty * unidadesPorPack;
-        const costo = (p?.precioCosto || it.precioCosto || 0) * unidadesReales;
-        gMes += it.precio*it.qty - costo;
+        const costoPorItem = it.isPack && (p?.precioCostoPack||it.precioCostoPack)
+          ? (p?.precioCostoPack||it.precioCostoPack) * it.qty
+          : (p?.precioCosto || it.precioCosto || 0) * unidadesReales;
+        gMes += it.precio*it.qty - costoPorItem;
       });
     });
     document.getElementById('d-ganancia-mes').textContent = fPYG(gMes);
@@ -1303,19 +1316,35 @@ function filtrarProductos(q){
 }
 
 function calcPreviewMargen(){
-  const c=parseFloat(document.getElementById('prod-costo').value)||0;
-  const v=parseFloat(document.getElementById('prod-precio').value)||0;
-  const el=document.getElementById('prod-margen-preview');
-  if(c>0&&v>0){
-    const mg=margenPct(c,v);
-    el.style.display='block';
-    el.textContent=`Ganancia por unidad: ${fPYG(v-c)} · Margen: ${mg}%`;
-  } else { el.style.display='none'; }
+  const vUnit = parseFloat(document.getElementById('prod-precio')?.value)||0;
+  const vPack = parseFloat(document.getElementById('prod-precio-pack')?.value)||0;
+  const cPack = parseFloat(document.getElementById('prod-costo-pack')?.value)||0;
+  const desc  = document.getElementById('prod-pack-desc')?.value||'';
+  const units = parseInt(desc.replace(/\D/g,''))||0;
+  const el    = document.getElementById('prod-margen-preview');
+  if(!el) return;
+  let html = '';
+  // Costo unitario derivado
+  if(cPack>0 && units>0){
+    const cUnit = cPack/units;
+    if(vUnit>0){
+      const ganUnit = vUnit-cUnit;
+      const mgUnit  = Math.round((ganUnit/cUnit)*100);
+      html += `Unitario — Costo: ${fPYG(cUnit)} · Ganancia: ${fPYG(ganUnit)} · Margen: ${mgUnit}%`;
+    }
+    if(vPack>0){
+      const ganPack = vPack-cPack;
+      const mgPack  = Math.round((ganPack/cPack)*100);
+      html += (html?'<br>':'')+`Pack (${units}u) — Costo: ${fPYG(cPack)} · Ganancia: ${fPYG(ganPack)} · Margen: ${mgPack}%`;
+    }
+  }
+  if(html){ el.style.display='block'; el.innerHTML=html; }
+  else { el.style.display='none'; }
 }
 
 function abrirModalProducto(){
-  ['prod-id','prod-nombre','prod-categoria','prod-barcode','prod-costo','prod-precio','prod-precio-pack','prod-pack-desc','prod-stock','prod-stock-min']
-    .forEach(id=>document.getElementById(id).value='');
+  ['prod-id','prod-nombre','prod-categoria','prod-barcode','prod-precio','prod-costo-pack','prod-precio-pack','prod-pack-desc','prod-stock','prod-stock-min']
+    .forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('prod-margen-preview').style.display='none';
   document.getElementById('modal-prod-titulo').textContent='Nuevo Producto';
   openModal('modal-producto');
@@ -1327,8 +1356,8 @@ function editarProducto(id){
   document.getElementById('prod-nombre').value      = p.nombre||'';
   document.getElementById('prod-categoria').value   = p.categoria||'';
   document.getElementById('prod-barcode').value     = p.barcode||'';
-  document.getElementById('prod-costo').value       = p.precioCosto||'';
   document.getElementById('prod-precio').value      = p.precio||'';
+  document.getElementById('prod-costo-pack').value  = p.precioCostoPack||'';
   document.getElementById('prod-precio-pack').value = p.precioPack||'';
   document.getElementById('prod-pack-desc').value   = p.packDesc||'';
   document.getElementById('prod-stock').value       = p.stock||0;
@@ -1340,14 +1369,23 @@ function editarProducto(id){
 
 async function guardarProducto(){
   const id=document.getElementById('prod-id').value;
+  const precio    = parseFloat(document.getElementById('prod-precio').value)||0;
+  const precioPack= parseFloat(document.getElementById('prod-precio-pack').value)||0;
+  const costoPack = parseFloat(document.getElementById('prod-costo-pack').value)||0;
+  const packDesc  = document.getElementById('prod-pack-desc').value.trim();
+  const units     = parseInt(packDesc.replace(/\D/g,''))||1;
+  // Costo unitario derivado del costo del pack
+  const costoUnit = costoPack>0 && units>0 ? Math.round(costoPack/units) : 0;
+
   const data={
     nombre:    document.getElementById('prod-nombre').value.trim(),
     categoria: document.getElementById('prod-categoria').value.trim(),
     barcode:   document.getElementById('prod-barcode').value.trim(),
-    precioCosto: parseFloat(document.getElementById('prod-costo').value)||0,
-    precio:    parseFloat(document.getElementById('prod-precio').value)||0,
-    precioPack:parseFloat(document.getElementById('prod-precio-pack').value)||0,
-    packDesc:  document.getElementById('prod-pack-desc').value.trim(),
+    precio,
+    precioPack,
+    precioCostoPack: costoPack,
+    precioCosto: costoUnit,  // calculado automáticamente
+    packDesc,
     stock:     parseInt(document.getElementById('prod-stock').value)||0,
     stockMin:  parseInt(document.getElementById('prod-stock-min').value)||0,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -1485,7 +1523,7 @@ function addToCart(prodId, isPack){
     if(exist.qty+1>(p.stock||0)){ toast('No hay suficiente stock','warn'); return; }
     exist.qty++;
   } else {
-    cart.push({id:prodId,nombre:p.nombre,precio,precioCosto:p.precioCosto||0,isPack,packDesc:p.packDesc||'',qty:1});
+    cart.push({id:prodId,nombre:p.nombre,precio,precioCosto:p.precioCosto||0,precioCostoPack:p.precioCostoPack||0,isPack,packDesc:p.packDesc||'',qty:1});
   }
   renderCart();
 }
@@ -1758,7 +1796,9 @@ async function cerrarCaja(){
     ].join('\n');
 
     const adminTel='595975159146';
+    const nicolTel='5959911429399';
     window.open(`https://wa.me/${adminTel}?text=${encodeURIComponent(lineas)}`,'_blank');
+    setTimeout(()=>window.open(`https://wa.me/${nicolTel}?text=${encodeURIComponent(lineas)}`,'_blank'),1500);
 
     cajaActual=null;
     toast('Caja cerrada — se abrió WhatsApp para notificar al admin');
@@ -1858,6 +1898,63 @@ async function eliminarVenta(id, items){
     toast('Venta eliminada y stock devuelto');
     loadHistorialVentas();
   }catch(e){ toast('Error: '+e.message,'error'); }
+}
+
+// ===================================================
+// RESET SISTEMA (máx 2 usos, solo admin)
+// ===================================================
+const RESET_KEY = 'surtidor_nc_reset_uses';
+const MAX_RESET_USES = 2;
+
+async function cargarEstadoReset(){
+  if(curRole!=='admin') return;
+  try{
+    const doc = await db.collection('config').doc('reset').get();
+    const uses = doc.exists ? (doc.data().uses||0) : 0;
+    const card = document.getElementById('card-reset-sistema');
+    const label = document.getElementById('reset-usos-restantes');
+    if(!card||!label) return;
+    const restantes = MAX_RESET_USES - uses;
+    if(restantes<=0){
+      card.style.display='none';
+    } else {
+      card.style.display='block';
+      label.textContent = `Usos restantes: ${restantes} de ${MAX_RESET_USES}`;
+    }
+  }catch(e){}
+}
+
+async function resetearSistema(){
+  // Verificar usos
+  const doc = await db.collection('config').doc('reset').get();
+  const uses = doc.exists ? (doc.data().uses||0) : 0;
+  if(uses>=MAX_RESET_USES){
+    toast('Ya se agotaron los usos del reset','error'); return;
+  }
+  const restantes = MAX_RESET_USES - uses;
+  if(!confirm(`⚠️ RESETEAR SISTEMA\n\nEsto borrará:\n- Todas las ventas\n- Historial de caja\n- Egresos\n- Créditos\n- Movimientos de stock\n\nLos PRODUCTOS se conservan.\n\nUsos restantes después de esto: ${restantes-1}\n\n¿Estás seguro?`)) return;
+  if(!confirm('Segunda confirmación — ¿Confirmar RESET TOTAL del sistema?')) return;
+
+  toast('Reseteando...','warn');
+  try{
+    // Borrar colecciones en lotes
+    const colecciones = ['ventas','caja','egresos','movimientos','creditos','cierres_mes'];
+    for(const col of colecciones){
+      const snap = await db.collection(col).get();
+      const batch = db.batch();
+      snap.forEach(d=>batch.delete(d.ref));
+      if(!snap.empty) await batch.commit();
+    }
+    // Registrar uso
+    await db.collection('config').doc('reset').set({ uses: uses+1 });
+
+    toast(`✅ Sistema reseteado. Usos restantes: ${restantes-1}`);
+    // Actualizar UI
+    const card=document.getElementById('card-reset-sistema');
+    const label=document.getElementById('reset-usos-restantes');
+    if(restantes-1<=0 && card) card.style.display='none';
+    else if(label) label.textContent=`Usos restantes: ${restantes-1} de ${MAX_RESET_USES}`;
+  }catch(e){ toast('Error al resetear: '+e.message,'error'); }
 }
 
 // ===================================================
